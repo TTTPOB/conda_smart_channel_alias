@@ -1,10 +1,10 @@
-name = "" # todo
+name = "conda_smart_channel_alias"
 main = "build/worker/shim.mjs"
 compatibility_date = "2022-01-20"
 
 [vars]
-SELF_URL="https://conda-mirror.example.com/"
-MIRROR_SITE="https://mirrors.tuna.tsinghua.edu.cn/anaconda/"
+
+MIRROR_SITE="https://mirrors.tuna.tsinghua.edu.cn/anaconda"
 MIRRORED_PKGS_CHANNEL="""main
 r
 msys2
@@ -19,4 +19,4 @@ simpleitk
 """
 
 [build]
-command = "cargo install -q worker-build --version 0.0.7 && worker-build --release"
+command = "cargo install -q worker-build --version 0.0.8 && worker-build --release"

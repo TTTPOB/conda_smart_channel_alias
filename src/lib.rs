@@ -1,4 +1,3 @@
-use serde_json::json;
 use std::{collections::HashSet, str::FromStr};
 use worker::*;
 
@@ -15,9 +14,8 @@ fn log_request(req: &Request) {
 }
 
 struct MirrorConfig {
-    anaconda_official_url: String,
-    site_prefix: String,
-    mirror_site: String,
+    anaconda_official_url: Url,
+    mirror_site: Url,
     pkgs_channel: HashSet<String>,
     cloud_channel: HashSet<String>,
 }
@@ -25,9 +23,8 @@ struct MirrorConfig {
 impl MirrorConfig {
     fn new_from_env(env: &RouteContext<()>) -> Self {
         // Setup information
-        let anaconda_official = "https://anaconda.org/";
+        let anaconda_official = "https://conda.anaconda.org";
         let mirror_site = env.var("MIRROR_SITE").unwrap().to_string();
-        let site_prefix = env.var("SITE_PREFIX").unwrap().to_string();
         let mirrored_pkgs_channel: HashSet<String> = env
             .var("MIRRORED_PKGS_CHANNEL")
             .unwrap()
@@ -36,48 +33,72 @@ impl MirrorConfig {
             .map(|x| x.to_string())
             .collect();
         let mirrored_cloud_channel: HashSet<String> = env
-            .var("MIRRORED_CLOUD_CHNNEL")
+            .var("MIRRORED_CLOUD_CHANNEL")
             .unwrap()
             .to_string()
             .lines()
             .map(|x| x.to_string())
             .collect();
         MirrorConfig {
-            anaconda_official_url: anaconda_official.to_string(),
-            site_prefix: site_prefix,
-            mirror_site: mirror_site,
+            anaconda_official_url: Url::from_str(&anaconda_official).unwrap(),
+            mirror_site: Url::from_str(&mirror_site).unwrap(),
             pkgs_channel: mirrored_pkgs_channel,
             cloud_channel: mirrored_cloud_channel,
         }
     }
 }
 
-fn get_channel(url: &str, site_prefix: &str) -> String {
-    let trimmed_url = url.replace(site_prefix, "");
-    let channel: Vec<&str> = trimmed_url.split("/").collect();
-    let channel = channel[0].to_string();
+fn get_channel(path: &str) -> String {
+    let channel: Vec<&str> = path.split("/").collect();
+    let channel = channel[1].to_string();
+    console_log!("channel: {}", channel);
     channel
 }
 
-fn get_pkgs_channel_url(url:&str, config: &MirrorConfig) -> String{
-    let result=config.mirror_site.to_string()+"pkgs/";
-    let pkg_url = url.replace(&config.site_prefix, &result);
+fn get_pkgs_channel_url(path: &str, config: &MirrorConfig) -> Url {
+    let mut mirror_site = config.mirror_site.to_string();
+    mirror_site.push_str(format!("/pkg{}", path).as_str());
+
+    let pkg_url = Url::from_str(&mirror_site).unwrap();
+    console_log!("pkg_url: {}", pkg_url);
     pkg_url
 }
 
-fn get_cloud_channel_url(url: &str, config: &MirrorConfig) -> String {
-    let result = config.mirror_site.to_string() + "cloud/";
-    let cloud_url = url.replace(&config.site_prefix, &result);
+fn get_cloud_channel_url(path: &str, config: &MirrorConfig) -> Url {
+    let mut mirror_site = config.mirror_site.to_string();
+    mirror_site.push_str(format!("/cloud{}", path).as_str());
+
+    let cloud_url = Url::from_str(&mirror_site).unwrap();
+    console_log!("cloud_url: {}", cloud_url);
     cloud_url
 }
 
-fn get_mirrored_package_url(url: &str, config: &MirrorConfig) -> String {
-    let channel = get_channel(url, &config.site_prefix);
-    let mirrored_url = match (config.pkgs_channel.contains(&channel), config.cloud_channel.contains(&channel)) {
-        (true, _) => get_pkgs_channel_url(url, config),
-        (_, true) => get_cloud_channel_url(url, config),
-        _ => url.to_string(),
+fn get_anaconda_official_url(path: &str, config: &MirrorConfig) -> Url {
+    let official_url = config.anaconda_official_url.join(path).unwrap();
+    console_log!("official_url: {}", official_url);
+    official_url
+}
+
+fn get_mirrored_package_url(url: &str, config: &MirrorConfig) -> Url {
+    let channel = get_channel(url);
+    let mirrored_url = match (
+        config.pkgs_channel.contains(&channel),
+        config.cloud_channel.contains(&channel),
+    ) {
+        (true, _) => {
+            console_log!("belongs to pkgs channel");
+            get_pkgs_channel_url(url, config)
+        }
+        (_, true) => {
+            console_log!("belongs to cloud channel");
+            get_cloud_channel_url(url, config)
+        }
+        _ => {
+            console_log!("belongs to none of the channels, fallback to official channel");
+            get_anaconda_official_url(url, config)
+        }
     };
+    console_log!("Mirrored url: {}", mirrored_url);
     mirrored_url
 }
 
@@ -97,17 +118,123 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
     // functionality and a `RouteContext` which you can use to  and get route parameters and
     // Environment bindings like KV Stores, Durable Objects, Secrets, and Variables.
     router
-        .get("/", |req, ctx| {
-            // config
-            let config = MirrorConfig::new_from_env(&ctx);
+        .get(
+            "/",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
 
-            let req_url = req.url().unwrap();
-            let req_url_str = req_url.to_string();
-            let mirrored_url = get_mirrored_package_url(&req_url_str, &config);
-            // a 302 redirect
-            let resp = Response::redirect(Url::from_str(&mirrored_url).unwrap());
-            resp
-        }) 
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
+        .get(
+            "/:a",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
+
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
+        .get(
+            "/:a/:b",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
+
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
+        .get(
+            "/:a/:b/:c",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
+
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
+        .get(
+            "/:a/:b/:c/:d",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
+
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
+        .get(
+            "/:a/:b/:c/:d/:e",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
+
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
+        .get(
+            "/:a/:b/:c/:d/:e/:f",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
+
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
+        .get(
+            "/:a/:b/:c/:d/:e/:f/:g",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
+
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
+        .get(
+            "/:a/:b/:c/:d/:e/:f/:g/:h",
+            |req, ctx| {
+                // config
+                let config = MirrorConfig::new_from_env(&ctx);
+
+                let req_path = req.path();
+                let mirrored_url = get_mirrored_package_url(&req_path, &config);
+                // a 302 redirect
+                let resp = Response::redirect(mirrored_url);
+                resp
+            },
+        )
         .run(req, env)
         .await
 }
